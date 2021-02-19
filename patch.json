@@ -3,7 +3,7 @@
         "containers": [
             {
                 "name": "maintenance",
-                "image": "quay.io/fvaleri/rsync@sha256:320eac2c1c96f8d40a4430b6dd7f8807229f0396614361478147ad780e5897c3",
+                "image": "quay.io/fvaleri/rsync:latest",
                 "command": [
                     "/bin/ash",
                     "-c",

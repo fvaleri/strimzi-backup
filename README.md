@@ -7,9 +7,9 @@ hot/online backup strategies, then you should look at `MirrorMaker2` to copy the
 cluster in a different data center.
 
 To run the script you need to be logged it as `cluster-admin` user. Each backup archive contains
-a `README` file reporting the Operator's version that you need to deploy after the restore procedure
-has completed. It only supports local file system. Consumer group offsets are included, but not
-KafkaConnect custom images that are usually hosted on an external image registry.
+a `README` file reporting the Operator's version, that you need to deploy after the restore procedure.
+It only supports local file system. Consumer group offsets are included, but not KafkaConnect custom
+images, that are usually hosted on an external image registry.
 
 This is a work in progress, contributions are welcomed.
 
@@ -28,7 +28,7 @@ OPERATOR_URL="https://github.com/strimzi/strimzi-kafka-operator\
 SOURCE_NS="kafka"
 TARGET_NS="kafka"
 
-# SETUP
+### SETUP ###
 # deploy a test cluster
 oc new-project $SOURCE_NS
 curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $SOURCE_NS/g" | oc apply -f -
@@ -36,7 +36,7 @@ oc apply -f ./tests/test-$STRIMZI_VERSION.yaml
 oc create cm custom-test --from-literal=foo=bar
 oc create secret generic custom-test --from-literal=foo=bar
 
-# EXERCISE
+### EXERCISE ###
 # send 100000 messages
 oc run kafka-producer-perf-test -it \
     --image="quay.io/strimzi/kafka:latest-kafka-2.6.0" \
@@ -70,7 +70,7 @@ oc delete ns $SOURCE_NS
 # set script parameters and restore
 ./run.sh restore
 
-# VERIFY
+### VERIFY ###
 # deploy the operator and wait for provisioning
 curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $TARGET_NS/g" | oc apply -f -
 
@@ -79,12 +79,12 @@ oc exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-consumer-groups.sh --bootstrap-server :9092 \
     --group my-group --describe
 
-# check consumer group recovery
+# check consumer group recovery (expected: 12345)
 oc exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-console-consumer.sh --bootstrap-server :9092 \
     --topic my-topic --group my-group --from-beginning --timeout-ms 15000
 
-# check total number of messages with a new consumer group
+# check total number of messages with a new consumer group (expected: 112345)
 oc exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-console-consumer.sh --bootstrap-server :9092 \
     --topic my-topic --group my-group-new --from-beginning --timeout-ms 15000

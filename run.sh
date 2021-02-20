@@ -4,6 +4,7 @@ set -Eeuo pipefail
 __TMP="/tmp/strimzi-backup" && mkdir -p $__TMP
 __HOME="" && pushd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" >/dev/null \
     && { __HOME=$PWD; popd >/dev/null; }
+__MPOD="maintenance"
 
 SOURCE_NS="kafka"
 TARGET_NS="kafka"
@@ -11,14 +12,15 @@ CLUSTER_NAME="my-cluster"
 BACKUP_NAME="$SOURCE_NS-$(date +%Y%m%d)"
 BACKUP_HOME="/tmp"
 
-ZOO_REPLICAS="3"
 # PVC size must match with the corresponding CR value
+# PVC class must be empty when not available
+# specify number of JBOD volumes or zero
+ZOO_REPLICAS="3"
 ZOO_PVC_SIZE="1Gi"
-ZOO_PVC_CLASS="gp2"
+ZOO_PVC_CLASS=""
 KAFKA_REPLICAS="3"
 KAFKA_PVC_SIZE="10Gi"
-KAFKA_PVC_CLASS="gp2"
-# number of JBOD volumes or zero if you are not using it
+KAFKA_PVC_CLASS=""
 KAFKA_JBOD="2"
 
 # custom configmap names
@@ -77,12 +79,15 @@ __export() {
 
 __create_pvc() {
     local pvc="$1"
-    local class="$2"
-    local size="$3"
-    if [[ -n $pvc && -n $class && -n $size ]]; then
-        echo "Creating pvc $pvc of size $size and class $class"
-        sed "s/\$pvc/$pvc/g; s/\$class/$class/g; s/\$size/$size/g" \
-            $__HOME/pvc.yaml | oc create -f -
+    local size="$2"
+    local class="${3-}"
+    if [[ -n $pvc && -n $size ]]; then
+        local exp="s/\$pvc/$pvc/g; s/\$size/$size/g; /storageClassName/d"
+        if [[ -n $class ]]; then
+            exp="s/\$pvc/$pvc/g; s/\$size/$size/g; s/\$class/$class/g"
+        fi
+        echo "Creating pvc $pvc of size $size"
+        sed "$exp" $__HOME/pvc.yaml | oc create -f -
     else
         __error "Missing required parameters"
     fi
@@ -94,10 +99,10 @@ __rsync() {
     local to="$3"
     if [[ -n $pvc && -n $from && -n $to ]]; then
         local patch=$(sed "s/\$pvc/$pvc/g" $__HOME/patch.json)
-        oc run maintenance --image="dummy" --restart="Never" --overrides="$patch"
-        oc wait --for condition="ready" pod maintenance --timeout="300s"
+        oc run $__MPOD --image="dummy" --restart="Never" --overrides="$patch"
+        oc wait --for condition="ready" pod $__MPOD --timeout="300s"
         oc rsync --no-perms --delete --progress $from $to
-        oc delete pod maintenance
+        oc delete pod $__MPOD
     else
         __error "Missing required parameters"
     fi
@@ -111,6 +116,8 @@ __compress() {
         zip -qr $BACKUP_NAME.zip *
         mv $BACKUP_NAME.zip $BACKUP_HOME
         cd $current_dir
+    else
+        __error "Missing required parameters"
     fi
 }
 
@@ -119,18 +126,19 @@ __uncompress() {
         echo "Uncompressing"
         rm -rf $__TMP
         unzip -qo $BACKUP_HOME/$BACKUP_NAME.zip -d $__TMP
+    else
+        __error "Missing required parameters"
     fi
 }
 
 backup() {
     __confirm $SOURCE_NS
     mkdir -p $__TMP/resources $__TMP/data
-    oc new-project $SOURCE_NS 2>/dev/null || oc project $SOURCE_NS
-    oc delete pod maintenance 2>/dev/null ||true
+    oc project $SOURCE_NS
 
     # export operator version
-    OPERATOR_POD="$(oc get pods | grep strimzi-cluster-operator | grep Running | cut -d " " -f1)"
-    oc exec -it $OPERATOR_POD -- env | grep "STRIMZI_VERSION" > $__TMP/README
+    local op_pod="$(oc get pods | grep strimzi-cluster-operator | grep Running | cut -d " " -f1)"
+    oc exec -it $op_pod -- env | grep "STRIMZI_VERSION" > $__TMP/README
 
     # export resources
     __export "kafkas"
@@ -164,7 +172,7 @@ backup() {
         local pvc="data-$CLUSTER_NAME-zookeeper-$i"
         local local_path="$__TMP/data/$pvc"
         mkdir -p $local_path
-        __rsync $pvc maintenance:/data/. $local_path
+        __rsync $pvc $__MPOD:/data/. $local_path
     done
     for (( i = 0; i < $KAFKA_REPLICAS; i++ )); do
         if [ $KAFKA_JBOD -gt 0 ]; then
@@ -172,13 +180,13 @@ backup() {
                 local pvc="data-$j-$CLUSTER_NAME-kafka-$i"
                 local local_path="$__TMP/data/$pvc"
                 mkdir -p $local_path
-                __rsync $pvc maintenance:/data/. $__TMP/data/$pvc
+                __rsync $pvc $__MPOD:/data/. $__TMP/data/$pvc
             done
         else
             local pvc="data-$CLUSTER_NAME-kafka-$i"
             local local_path="$__TMP/data/$pvc"
             mkdir -p $local_path
-            __rsync $pvc maintenance:/data/. $__TMP/data/$pvc
+            __rsync $pvc $__MPOD:/data/. $__TMP/data/$pvc
         fi
     done
 
@@ -194,27 +202,27 @@ backup() {
 restore() {
     __confirm $TARGET_NS
     oc new-project $TARGET_NS 2>/dev/null || oc project $TARGET_NS
-    oc delete pod maintenance 2>/dev/null ||true
     __uncompress
+    chmod -R ugo+rw $__TMP
 
     # for each PVC, create it and rsync data from backup to PV
     # this must be done *before* deploying the cluster
     for (( i = 0; i < $ZOO_REPLICAS; i++ )); do
         local pvc="data-$CLUSTER_NAME-zookeeper-$i"
-        __create_pvc $pvc $ZOO_PVC_CLASS $ZOO_PVC_SIZE
-        __rsync $pvc $__TMP/data/$pvc/. maintenance:/data
+        __create_pvc $pvc $ZOO_PVC_SIZE $ZOO_PVC_CLASS
+        __rsync $pvc $__TMP/data/$pvc/. $__MPOD:/data
     done
     for (( i = 0; i < $KAFKA_REPLICAS; i++ )); do
         if [ $KAFKA_JBOD -gt 0 ]; then
             for (( j = 0; j < $KAFKA_JBOD; j++ )); do
                 local pvc="data-$j-$CLUSTER_NAME-kafka-$i"
-                __create_pvc $pvc $KAFKA_PVC_CLASS $KAFKA_PVC_SIZE
-                __rsync $pvc $__TMP/data/$pvc/. maintenance:/data
+                __create_pvc $pvc $KAFKA_PVC_SIZE $KAFKA_PVC_CLASS
+                __rsync $pvc $__TMP/data/$pvc/. $__MPOD:/data
             done
         else
             local pvc="data-$CLUSTER_NAME-kafka-$i"
-            __create_pvc $pvc $KAFKA_PVC_CLASS $KAFKA_PVC_SIZE
-            __rsync $pvc $__TMP/data/$pvc/. maintenance:/data
+            __create_pvc $pvc $KAFKA_PVC_SIZE $KAFKA_PVC_CLASS
+            __rsync $pvc $__TMP/data/$pvc/. $__MPOD:/data
         fi
     done
 

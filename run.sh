@@ -6,7 +6,7 @@ __HOME="" && pushd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" >/dev/null 
     && { __HOME=$PWD; popd >/dev/null; }
 
 SOURCE_NS="kafka"
-TARGET_NS="kafka-new"
+TARGET_NS="kafka"
 CLUSTER_NAME="my-cluster"
 BACKUP_NAME="$SOURCE_NS-$(date +%Y%m%d)"
 BACKUP_HOME="/tmp"

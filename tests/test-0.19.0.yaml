@@ -5,9 +5,9 @@ metadata:
 spec:
   kafka:
     replicas: 3
-    version: 2.6.0
+    version: 2.5.0
     config:
-      log.message.format.version: 2.6
+      log.message.format.version: 2.5
       num.partitions: 3
       offsets.topic.replication.factor: 3
       default.replication.factor: 3
@@ -15,18 +15,10 @@ spec:
       transaction.state.log.replication.factor: 3
       transaction.state.log.min.isr: 2
     listeners:
-      - name: plain
-        port: 9092
-        type: internal
-        tls: false
-      - name: tls
-        port: 9093
-        type: internal
-        tls: true
-      - name: external
-        port: 9094
+      plain: {}
+      tls: {}
+      external:
         type: route
-        tls: true
     logging:
       type: inline
       loggers:

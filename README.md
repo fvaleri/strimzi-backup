@@ -1,17 +1,16 @@
 # Strimzi backup
-Script to create cold/offline incremental backups of `Strimzi` namespaces on `Kubernetes/OpenShift`.
+Script for cold/offline incremental backups of `Strimzi` namespaces on `Kubernetes/OpenShift`.
 
-If you think you do not need a backup strategy for Kafka as it has embedded replication, then try
-to immagine a misconfiguration, or a bug, or a security-breach deleting all your data. If you prefer
-hot/online backup strategies, then you should look at `MirrorMaker2` to copy the data to a backup
-cluster in a different data center.
+If you think you do not need a backup strategy for Kafka as it has embedded data replication,
+then try to immagine a misconfiguration/bug/security-breach deleting all your data. For hot/online
+backups, you should look at `MirrorMaker2` to sync with a remote cluster, but this comes with its
+own complexities and requires additional resources.
 
-To run the script you need to be logged it as `cluster-admin` user. Each backup archive contains
-a `README` file reporting the Operator's version, that you need to deploy after the restore procedure.
-It only supports local file system. Consumer group offsets are included, but not KafkaConnect custom
-images, that are usually hosted on an external image registry.
-
-This is a work in progress, contributions are welcomed.
+To run the script you must be logged in as `cluster-admin` user. Each backup archive contains a
+`README` file reporting the operator's version that you need to deploy after restore. In order to
+be consistent, it shuts down the cluster and restarts it when the backup procedure has terminated.
+Only local file system is supported, consumer group offsets are included, but not KafkaConnect
+custom images, that are usually hosted on an external registry.
 
 ## Requirements
 - Bash 5

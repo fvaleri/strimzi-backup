@@ -138,7 +138,7 @@ backup() {
 
     # export operator version
     local op_pod="$(oc get pods | grep strimzi-cluster-operator | grep Running | cut -d " " -f1)"
-    oc exec -it $op_pod -- env | grep "STRIMZI_VERSION" > $__TMP/README
+    oc exec -it $op_pod -- env | grep "VERSION" > $__TMP/README ||true
 
     # export resources
     __export "kafkas"

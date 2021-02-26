@@ -180,7 +180,7 @@ spec:
         memory: 256Mi
     storage:
       type: persistent-claim
-      size: 1Gi
+      size: 5Gi
       deleteClaim: true
     readinessProbe:
       initialDelaySeconds: 30

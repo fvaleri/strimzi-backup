@@ -3,20 +3,22 @@ Script for cold/offline incremental backups of `Strimzi` namespaces on `Kubernet
 
 If you think you do not need a backup strategy for Kafka as it has embedded data replication,
 then try to immagine a misconfiguration/bug/security-breach deleting all your data. For hot/online
-backups, you should look at `MirrorMaker2` to sync with a remote cluster, but this comes with its
-own complexities and requires additional resources.
+backups, you should look at `MirrorMaker2` to sync with a remote cluster, but this comes with
+additional complexities and required resources.
 
-To run the script you must be logged in as `cluster-admin` user. Each backup archive contains a
-`README` file reporting the operator's version that you need to deploy after restore. In order to
-be consistent, it shuts down the cluster and restarts it when the backup procedure has terminated.
+To run the script you must be logged in as `cluster-admin` user. Each backup archive contains
+an `env` file reporting the operator's version that you need to deploy after restore. In order to
+be consistent, the backup shuts down the cluster and restarts it when the procedure has terminated.
 Only local file system is supported, consumer group offsets are included, but not KafkaConnect
 custom images, that are usually hosted on an external registry.
 
 ## Requirements
-- Bash 5
-- oc 4 (OpenShift CLI)
-- yq 4 (YAML processor)
-- zip/unzip tools
+- Bash 5.1.4(1)-release (GNU)
+- kubectl v1.20.4 (Kubernetes)
+- tar 1.33 (GNU)
+- yq 4.5.1 (YAML processor)
+- zip 3.0 (Info-ZIP)
+- unzip 6.00 (Info-ZIP)
 - enough disk space
 
 ## Test procedure
@@ -24,37 +26,38 @@ custom images, that are usually hosted on an external registry.
 STRIMZI_VERSION="0.21.1"
 OPERATOR_URL="https://github.com/strimzi/strimzi-kafka-operator\
 /releases/download/$STRIMZI_VERSION/strimzi-cluster-operator-$STRIMZI_VERSION.yaml"
-SOURCE_NS="kafka"
-TARGET_NS="kafka"
+SOURCE_NS="strimzi"
+TARGET_NS="strimzi"
 
 ### SETUP ###
 # deploy a test cluster
-oc new-project $SOURCE_NS
-curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $SOURCE_NS/g" | oc apply -f -
-oc apply -f ./tests/test-$STRIMZI_VERSION.yaml
-oc create cm custom-test --from-literal=foo=bar
-oc create secret generic custom-test --from-literal=foo=bar
+kubectl create namespace $SOURCE_NS
+kubectl config set-context --current --namespace=$SOURCE_NS
+curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $SOURCE_NS/g" | kubectl apply -f -
+kubectl apply -f ./tests/test-$STRIMZI_VERSION.yaml
+kubectl create cm custom-test --from-literal=foo=bar
+kubectl create secret generic custom-test --from-literal=foo=bar
 
 ### EXERCISE ###
 # send 100000 messages
-oc run kafka-producer-perf-test -it \
+kubectl run kafka-producer-perf-test -it \
     --image="quay.io/strimzi/kafka:latest-kafka-2.6.0" \
     --rm="true" --restart="Never" -- bin/kafka-producer-perf-test.sh \
     --topic my-topic --record-size 1000 --num-records 100000 --throughput -1 \
     --producer-props acks=1 bootstrap.servers=my-cluster-kafka-bootstrap:9092
 
 # consume them
-oc exec -it my-cluster-kafka-0 -c kafka -- \
+kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-console-consumer.sh --bootstrap-server :9092 \
     --topic my-topic --group my-group --from-beginning --timeout-ms 15000
 
 # save consumer group offsets
-oc exec -it my-cluster-kafka-0 -c kafka -- \
+kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-consumer-groups.sh --bootstrap-server :9092 \
     --group my-group --describe > /tmp/offsets.txt
 
 # send additional 12345 messages
-oc run kafka-producer-perf-test -it \
+kubectl run kafka-producer-perf-test -it \
     --image="quay.io/strimzi/kafka:latest-kafka-2.6.0" \
     --rm="true" --restart="Never" -- bin/kafka-producer-perf-test.sh \
     --topic my-topic --record-size 1000 --num-records 12345 --throughput -1 \
@@ -63,28 +66,26 @@ oc run kafka-producer-perf-test -it \
 # set script parameters and backup
 ./run.sh backup
 
-# delete the test cluster
-oc delete ns $SOURCE_NS
-
 # set script parameters and restore
+kubectl delete ns $SOURCE_NS
 ./run.sh restore
 
 ### VERIFY ###
 # deploy the operator and wait for provisioning
-curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $TARGET_NS/g" | oc apply -f -
+curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $TARGET_NS/g" | kubectl apply -f -
 
 # check consumer group offsets
-oc exec -it my-cluster-kafka-0 -c kafka -- \
+kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-consumer-groups.sh --bootstrap-server :9092 \
     --group my-group --describe
 
 # check consumer group recovery (expected: 12345)
-oc exec -it my-cluster-kafka-0 -c kafka -- \
+kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-console-consumer.sh --bootstrap-server :9092 \
     --topic my-topic --group my-group --from-beginning --timeout-ms 15000
 
 # check total number of messages with a new consumer group (expected: 112345)
-oc exec -it my-cluster-kafka-0 -c kafka -- \
+kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-console-consumer.sh --bootstrap-server :9092 \
     --topic my-topic --group my-group-new --from-beginning --timeout-ms 15000
 ```

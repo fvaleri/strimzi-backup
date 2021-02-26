@@ -3,9 +3,9 @@
         "containers": [
             {
                 "name": "maintenance",
-                "image": "quay.io/fvaleri/rsync:latest",
+                "image": "centos:7",
                 "command": [
-                    "/bin/ash",
+                    "/bin/bash",
                     "-c",
                     "trap : TERM INT; sleep infinity & wait"
                 ],

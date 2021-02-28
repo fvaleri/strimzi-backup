@@ -1,5 +1,5 @@
 # Strimzi backup
-Script for cold/offline incremental backups of `Strimzi` namespaces on `Kubernetes/OpenShift`.
+Script for cold/offline backups of namespaced `Strimzi` clusters on `Kubernetes/OpenShift`.
 
 If you think you do not need a backup strategy for Kafka as it has embedded data replication,
 then try to immagine a misconfiguration/bug/security-breach deleting all your data. For hot/online
@@ -26,8 +26,8 @@ custom images, that are usually hosted on an external registry.
 STRIMZI_VERSION="0.21.1"
 OPERATOR_URL="https://github.com/strimzi/strimzi-kafka-operator\
 /releases/download/$STRIMZI_VERSION/strimzi-cluster-operator-$STRIMZI_VERSION.yaml"
-SOURCE_NS="strimzi"
-TARGET_NS="strimzi"
+SOURCE_NS="test"
+TARGET_NS="test"
 
 ### SETUP ###
 # deploy a test cluster
@@ -63,12 +63,13 @@ kubectl run kafka-producer-perf-test -it \
     --topic my-topic --record-size 1000 --num-records 12345 --throughput -1 \
     --producer-props acks=1 bootstrap.servers=my-cluster-kafka-bootstrap:9092
 
-# set script parameters and backup
-./run.sh backup
+# run backup procedure
+./run.sh --backup $SOURCE_NS my-cluster /tmp/backups
 
-# set script parameters and restore
+# delete namespace and restore
 kubectl delete ns $SOURCE_NS
-./run.sh restore
+kubectl create ns $TARGET_NS
+./run.sh --restore $TARGET_NS my-cluster /tmp/backups/my-cluster-20210228111235.zip
 
 ### VERIFY ###
 # deploy the operator and wait for provisioning

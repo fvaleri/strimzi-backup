@@ -5,22 +5,11 @@ __TMP="/tmp/strimzi-backup" && mkdir -p $__TMP
 __HOME="" && pushd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" >/dev/null \
     && { __HOME=$PWD; popd >/dev/null; }
 
-SOURCE_NS="strimzi"
-TARGET_NS="strimzi"
-CLUSTER_NAME="my-cluster"
-BACKUP_NAME="$SOURCE_NS-$(date +%Y%m%d)"
-BACKUP_HOME="/tmp"
-
-# PVC size must match with the corresponding CR value
-# PVC class must be empty when not available
-# specify number of JBOD volumes or zero
-ZOO_REPLICAS="3"
-ZOO_PVC_SIZE="5Gi"
-ZOO_PVC_CLASS=""
-KAFKA_REPLICAS="3"
-KAFKA_PVC_SIZE="10Gi"
-KAFKA_PVC_CLASS=""
-NUM_OF_JBOD_VOLUMES="2"
+SOURCE_NS="${SOURCE_NS:-test}"
+TARGET_NS="${TARGET_NS:-test}"
+CLUSTER_NAME="${CLUSTER_NAME:-my-cluster}"
+BACKUP_DIR="${BACKUP_DIR:-/tmp}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-300s}"
 
 # custom configmap names
 # i.e. external logging configuration (log4j)
@@ -30,7 +19,7 @@ CUSTOM_CMS=(
 )
 
 # custom secret names
-# i.e. listener's certificate, image registry authentication
+# i.e. listener's certificate, registry authentication
 CUSTOM_SECRETS=(
     "ext-listener-crt"
     "registry-authn"
@@ -64,15 +53,29 @@ __select_ns() {
     fi
 }
 
-__create_or_select_ns() {
-    local ns="$1"
-    if [[ -n $ns ]]; then
-        kubectl create namespace $ns 2>/dev/null \
-            || __select_ns $ns
+__export_env() {
+    local op_name="strimzi-cluster-operator"
+    local op_pod="$(kubectl get pods | grep $op_name | grep Running | cut -d " " -f1)"
+    kubectl exec -it $op_pod -- env | grep "VERSION" \
+        | sed -e "s/^/declare -- /" > $__TMP/env ||true
+    local filter="data-$CLUSTER_NAME-zookeeper"
+    ZOO_REPLICAS=$(kubectl get pvc | grep $filter | wc -l)
+    ZOO_PVC_SIZE=$(kubectl get pvc | grep $filter-0 | awk '{print $4}')
+    ZOO_PVC_CLASS=$(kubectl get pvc | grep $filter-0 | awk '{print $6}')
+    JBOD_VOL_NUM=$(kubectl get pvc | grep $CLUSTER_NAME-kafka-0 | wc -l)
+    if ((JBOD_VOL_NUM > 0)); then
+        filter="data-0-$CLUSTER_NAME-kafka"
+    else
+        filter="data-$CLUSTER_NAME-kafka"
     fi
+    KAFKA_REPLICAS=$(kubectl get pvc | grep $filter | wc -l)
+    KAFKA_PVC_SIZE=$(kubectl get pvc | grep $filter-0 | awk '{print $4}')
+    KAFKA_PVC_CLASS=$(kubectl get pvc | grep $filter-0 | awk '{print $6}')
+    declare -px ZOO_REPLICAS ZOO_PVC_SIZE ZOO_PVC_CLASS JBOD_VOL_NUM \
+        KAFKA_REPLICAS KAFKA_PVC_SIZE KAFKA_PVC_CLASS >> $__TMP/env
 }
 
-__export() {
+__export_res() {
     local name="$1"
     local label="${2-}"
     if [[ -n $name ]]; then
@@ -115,7 +118,7 @@ __rsync() {
         local pod_name="backup"
         local patch=$(sed "s/\$pvc/$pvc/g" $__HOME/patch.json)
         kubectl run $pod_name --image="dummy" --restart="Never" --overrides="$patch"
-        kubectl wait --for condition="ready" pod $pod_name --timeout="300s"
+        kubectl wait --for condition="ready" pod $pod_name --timeout="$WAIT_TIMEOUT"
         if [[ $source == *"$__TMP"* ]]; then
             # upload from local to pod
             tar -C $source -c . | kubectl exec -i $pod_name -- sh -c "tar -C /data -xv"
@@ -124,7 +127,7 @@ __rsync() {
             local flags="-c --no-check-device --no-acls --no-xattrs --totals \
                 --listed-incremental /data/backup.snar --exclude=./backup.snar"
             if [ -z "$(ls -A $__TMP/data)" ]; then
-                # fallback to full download
+                # empty data, fallback to full download
                 flags="$flags --level=0"
             fi
             kubectl exec -i $pod_name -- sh -c "tar $flags -C /data ." | tar -C $target -xv -f -
@@ -136,12 +139,17 @@ __rsync() {
 }
 
 __compress() {
-    if [[ -n $BACKUP_NAME && -n $BACKUP_HOME ]]; then
-        echo "Compressing"
+    local source_dir="$1"
+    local file_path="$2"
+    if [[ -n $source_dir && -n $file_path ]]; then
+        echo "Compressing $source_dir to $file_path"
+        local backup_dir=$(dirname "$file_path")
+        local backup_name=$(basename "$file_path")
         local current_dir=$(pwd)
-        cd $__TMP
-        zip -qr $BACKUP_NAME.zip *
-        mv $BACKUP_NAME.zip $BACKUP_HOME
+        cd $source_dir
+        zip -qr $backup_name *
+        mkdir -p $backup_dir
+        mv $backup_name $backup_dir
         cd $current_dir
     else
         __error "Missing required parameters"
@@ -149,62 +157,76 @@ __compress() {
 }
 
 __uncompress() {
-    if [[ -n $BACKUP_NAME && -n $BACKUP_HOME ]]; then
-        echo "Uncompressing"
-        rm -rf $__TMP
-        unzip -qo $BACKUP_HOME/$BACKUP_NAME.zip -d $__TMP
-        chmod -R o+rw $__TMP
+    local file_path="$1"
+    local dest_dir="$2"
+    if [[ -n $file_path && -n $dest_dir ]]; then
+        echo "Uncompressing $file_path to $dest_dir"
+        rm -rf $dest_dir
+        unzip -qo $file_path -d $dest_dir
+        chmod -R o+rw $dest_dir
     else
         __error "Missing required parameters"
     fi
 }
 
 backup() {
-    __confirm "Start backup of $SOURCE_NS/$CLUSTER_NAME as $(__whoami) (cluster will be unavailable)"
-    mkdir -p $__TMP/resources $__TMP/data
-    __select_ns $SOURCE_NS
+    if [ $# -lt 3 ]; then
+        __error "Missing required arguments"
+    else
+        SOURCE_NS="$1"
+        CLUSTER_NAME="$2"
+        BACKUP_DIR="$3"
+    fi
 
-    # export operator version
-    local op_pod="$(kubectl get pods | grep strimzi-cluster-operator | grep Running | cut -d " " -f1)"
-    kubectl exec -it $op_pod -- env | grep "VERSION" > $__TMP/env ||true
+    # context init
+    __select_ns $SOURCE_NS
+    __TMP="$__TMP/$SOURCE_NS/$CLUSTER_NAME"
+    __confirm "Backup $SOURCE_NS/$CLUSTER_NAME as $(__whoami) - cluster will be unavailable"
+    mkdir -p $__TMP/resources $__TMP/data
+    __export_env
 
     # export resources
-    __export "kafkas"
-    __export "kafkatopics"
-    __export "kafkausers"
-    __export "kafkabridges"
-    __export "kafkaconnectors"
-    __export "kafkaconnects"
-    __export "kafkaconnects2is"
-    __export "kafkamirrormaker2s"
-    __export "kafkamirrormakers"
-    __export "kafkarebalances"
+    __export_res "kafkas"
+    __export_res "kafkatopics"
+    __export_res "kafkausers"
+    __export_res "kafkabridges"
+    __export_res "kafkaconnectors"
+    __export_res "kafkaconnects"
+    __export_res "kafkaconnects2is"
+    __export_res "kafkamirrormaker2s"
+    __export_res "kafkamirrormakers"
+    __export_res "kafkarebalances"
     # internal certificates and user secrets
-    __export "secrets" "strimzi.io/name=strimzi"
+    __export_res "secrets" "strimzi.io/name=strimzi"
     # custom configmap and secrets
     for name in "${CUSTOM_CMS[@]}"; do
-        __export "cm/$name"
+        __export_res "cm/$name"
     done
     for name in "${CUSTOM_SECRETS[@]}"; do
-        __export "secret/$name"
+        __export_res "secret/$name"
     done
 
     # stop operator and statefulsets
     kubectl scale deployment strimzi-cluster-operator --replicas 0
+    kubectl wait --for="delete" pod \
+        --selector="name=strimzi-cluster-operator" --timeout="$WAIT_TIMEOUT"
     kubectl scale statefulset $CLUSTER_NAME-kafka --replicas 0
+    kubectl wait --for="delete" pod \
+        --selector="strimzi.io/name=$CLUSTER_NAME-kafka" --timeout="$WAIT_TIMEOUT"
     kubectl scale statefulset $CLUSTER_NAME-zookeeper --replicas 0
-    sleep 120
+    kubectl wait --for="delete" pod \
+        --selector="strimzi.io/name=$CLUSTER_NAME-zookeeper" --timeout="$WAIT_TIMEOUT"
 
     # for each PVC, rsync data from PV to backup
-    for (( i = 0; i < $ZOO_REPLICAS; i++ )); do
+    for ((i = 0; i < $ZOO_REPLICAS; i++)); do
         local pvc="data-$CLUSTER_NAME-zookeeper-$i"
         local local_path="$__TMP/data/$pvc"
         mkdir -p $local_path
         __rsync $pvc $local_path
     done
-    for (( i = 0; i < $KAFKA_REPLICAS; i++ )); do
-        if [ $NUM_OF_JBOD_VOLUMES -gt 0 ]; then
-            for (( j = 0; j < $NUM_OF_JBOD_VOLUMES; j++ )); do
+    for ((i = 0; i < $KAFKA_REPLICAS; i++)); do
+        if ((JBOD_VOL_NUM > 0)); then
+            for ((j = 0; j < $JBOD_VOL_NUM; j++)); do
                 local pvc="data-$j-$CLUSTER_NAME-kafka-$i"
                 local local_path="$__TMP/data/$pvc"
                 mkdir -p $local_path
@@ -218,30 +240,40 @@ backup() {
         fi
     done
 
-    # start statefulsets and operator
-    kubectl scale statefulset $CLUSTER_NAME-zookeeper --replicas $ZOO_REPLICAS
-    kubectl scale statefulset $CLUSTER_NAME-kafka --replicas $KAFKA_REPLICAS
+    # start the operator
     kubectl scale deployment strimzi-cluster-operator --replicas 1
 
-    __compress
+    local backup_name="$CLUSTER_NAME-$(date +%Y%m%d%H%M%S)"
+    __compress $__TMP $BACKUP_DIR/$backup_name.zip
     echo "DONE"
 }
 
 restore() {
-    __confirm "Start restore of $TARGET_NS/$CLUSTER_NAME as $(__whoami)"
-    __create_or_select_ns $TARGET_NS
-    __uncompress
+    if [ $# -lt 3 ]; then
+        __error "Missing required arguments"
+    else
+        TARGET_NS="$1"
+        CLUSTER_NAME="$2"
+        BACKUP_FILE="$3"
+    fi
+
+    # context init
+    __select_ns $TARGET_NS
+    __TMP="$__TMP/$TARGET_NS/$CLUSTER_NAME"
+    __confirm "Restore $TARGET_NS/$CLUSTER_NAME as $(__whoami)"
+    __uncompress $BACKUP_FILE $__TMP
+    source $__TMP/env
 
     # for each PVC, create it and rsync data from backup to PV
     # this must be done *before* deploying the cluster
-    for (( i = 0; i < $ZOO_REPLICAS; i++ )); do
+    for ((i = 0; i < $ZOO_REPLICAS; i++)); do
         local pvc="data-$CLUSTER_NAME-zookeeper-$i"
         __create_pvc $pvc $ZOO_PVC_SIZE $ZOO_PVC_CLASS
         __rsync $__TMP/data/$pvc/. $pvc
     done
-    for (( i = 0; i < $KAFKA_REPLICAS; i++ )); do
-        if [ $NUM_OF_JBOD_VOLUMES -gt 0 ]; then
-            for (( j = 0; j < $NUM_OF_JBOD_VOLUMES; j++ )); do
+    for ((i = 0; i < $KAFKA_REPLICAS; i++)); do
+        if ((JBOD_VOL_NUM > 0)); then
+            for (( j = 0; j < $JBOD_VOL_NUM; j++ )); do
                 local pvc="data-$j-$CLUSTER_NAME-kafka-$i"
                 __create_pvc $pvc $KAFKA_PVC_SIZE $KAFKA_PVC_CLASS
                 __rsync $__TMP/data/$pvc/. $pvc
@@ -264,14 +296,16 @@ restore() {
 USAGE="Usage: $(basename "$0") [options]
 
 Options:
-  backup    Run backup procedure
-  restore   Run restore procedure"
+  -b, --backup   <source-ns> <cluster-name> <backup-dir>
+  -r, --restore  <target-ns> <cluster-name> <backup-file>"
 case "${1-}" in
-    backup)
-        backup
+    -b|--backup)
+        shift
+        backup "$@"
         ;;
-    restore)
-        restore
+    -r|--restore)
+        shift
+        restore "$@"
         ;;
     *)
         __error "$USAGE"

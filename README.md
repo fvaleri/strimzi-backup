@@ -26,17 +26,16 @@ custom images, that are usually hosted on an external registry.
 STRIMZI_VERSION="0.21.1"
 OPERATOR_URL="https://github.com/strimzi/strimzi-kafka-operator\
 /releases/download/$STRIMZI_VERSION/strimzi-cluster-operator-$STRIMZI_VERSION.yaml"
-SOURCE_NS="test"
-TARGET_NS="test"
+# here we are using the same source and target namespace
+NAMESPACE="test"
 
 ### SETUP ###
 # deploy a test cluster
-kubectl create namespace $SOURCE_NS
-kubectl config set-context --current --namespace=$SOURCE_NS
-curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $SOURCE_NS/g" | kubectl apply -f -
+kubectl create namespace $NAMESPACE
+kubectl config set-context --current --namespace=$NAMESPACE
+curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl apply -f -
 kubectl apply -f ./tests/test-$STRIMZI_VERSION.yaml
-kubectl create cm custom-test --from-literal=foo=bar
-kubectl create secret generic custom-test --from-literal=foo=bar
+kubectl create cm custom-cm --from-literal=foo=bar
 
 ### EXERCISE ###
 # send 100000 messages
@@ -64,16 +63,16 @@ kubectl run kafka-producer-perf-test -it \
     --producer-props acks=1 bootstrap.servers=my-cluster-kafka-bootstrap:9092
 
 # run backup procedure
-./run.sh --backup $SOURCE_NS my-cluster /tmp/backups
+./run.sh -b -n $NAMESPACE -c my-cluster -d /tmp/backups -m custom-cm
 
-# delete namespace and restore
-kubectl delete ns $SOURCE_NS
-kubectl create ns $TARGET_NS
-./run.sh --restore $TARGET_NS my-cluster /tmp/backups/my-cluster-20210228111235.zip
+# recreate the namespace and restore
+kubectl delete ns $NAMESPACE
+kubectl create ns $NAMESPACE
+./run.sh -r -n $NAMESPACE -c my-cluster -f /tmp/backups/my-cluster-20210304181809.zip
 
 ### VERIFY ###
 # deploy the operator and wait for provisioning
-curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $TARGET_NS/g" | kubectl apply -f -
+curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl apply -f -
 
 # check consumer group offsets
 kubectl exec -it my-cluster-kafka-0 -c kafka -- \
@@ -85,7 +84,7 @@ kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-console-consumer.sh --bootstrap-server :9092 \
     --topic my-topic --group my-group --from-beginning --timeout-ms 15000
 
-# check total number of messages with a new consumer group (expected: 112345)
+# check total number of messages (expected: 112345)
 kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-console-consumer.sh --bootstrap-server :9092 \
     --topic my-topic --group my-group-new --from-beginning --timeout-ms 15000

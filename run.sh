@@ -5,27 +5,6 @@ __TMP="/tmp/strimzi-backup" && mkdir -p $__TMP
 __HOME="" && pushd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" >/dev/null \
     && { __HOME=$PWD; popd >/dev/null; }
 
-SOURCE_NS="${SOURCE_NS:-test}"
-TARGET_NS="${TARGET_NS:-test}"
-CLUSTER_NAME="${CLUSTER_NAME:-my-cluster}"
-BACKUP_DIR="${BACKUP_DIR:-/tmp}"
-WAIT_TIMEOUT="${WAIT_TIMEOUT:-300s}"
-
-# custom configmap names
-# i.e. external logging configuration (log4j)
-CUSTOM_CMS=(
-    "log4j-properties"
-    "custom-test"
-)
-
-# custom secret names
-# i.e. listener's certificate, registry authentication
-CUSTOM_SECRETS=(
-    "ext-listener-crt"
-    "registry-authn"
-    "custom-test"
-)
-
 __error() {
     local message="$1"
     echo "$message"
@@ -89,7 +68,7 @@ __export_res() {
                 .metadata.uid, .items[].metadata.uid, \
                 .status, .items[].status)"
             local id=$(printf $name | sed 's/\//-/g;s/ //g')
-            kubectl get $crs -o yaml | yq eval "$exp" - > $__TMP/resources/$SOURCE_NS-$id.yaml
+            kubectl get $crs -o yaml | yq eval "$exp" - > $__TMP/resources/$NAMESPACE-$id.yaml
         fi
     fi
 }
@@ -123,11 +102,11 @@ __rsync() {
             # upload from local to pod
             tar -C $source -c . | kubectl exec -i $pod_name -- sh -c "tar -C /data -xv"
         else
-            # incremental download from pod to local
+            # incremental sync from pod to local
             local flags="-c --no-check-device --no-acls --no-xattrs --totals \
                 --listed-incremental /data/backup.snar --exclude=./backup.snar"
             if [ -z "$(ls -A $__TMP/data)" ]; then
-                # empty data, fallback to full download
+                # fallback to full sync
                 flags="$flags --level=0"
             fi
             kubectl exec -i $pod_name -- sh -c "tar $flags -C /data ." | tar -C $target -xv -f -
@@ -148,7 +127,6 @@ __compress() {
         local current_dir=$(pwd)
         cd $source_dir
         zip -qr $backup_name *
-        mkdir -p $backup_dir
         mv $backup_name $backup_dir
         cd $current_dir
     else
@@ -179,9 +157,15 @@ backup() {
     fi
 
     # context init
-    __select_ns $SOURCE_NS
-    __TMP="$__TMP/$SOURCE_NS/$CLUSTER_NAME"
-    __confirm "Backup $SOURCE_NS/$CLUSTER_NAME as $(__whoami) - cluster will be unavailable"
+    __select_ns $NAMESPACE
+    __TMP="$__TMP/$NAMESPACE/$CLUSTER_NAME"
+    __confirm "Backup $NAMESPACE/$CLUSTER_NAME as $(__whoami); the cluster will be unavailable"
+    if [ $INCREMENTAL = true ]; then
+        echo "Doing an incremental backup"
+    else
+        echo "Doing a full backup"
+        rm -rf $__TMP
+    fi
     mkdir -p $__TMP/resources $__TMP/data
     __export_env
 
@@ -199,10 +183,10 @@ backup() {
     # internal certificates and user secrets
     __export_res "secrets" "strimzi.io/name=strimzi"
     # custom configmap and secrets
-    for name in "${CUSTOM_CMS[@]}"; do
+    for name in $(printf $CUSTOM_CM | sed "s/,/ /g"); do
         __export_res "cm/$name"
     done
-    for name in "${CUSTOM_SECRETS[@]}"; do
+    for name in $(printf $CUSTOM_SE | sed "s/,/ /g"); do
         __export_res "secret/$name"
     done
 
@@ -258,9 +242,9 @@ restore() {
     fi
 
     # context init
-    __select_ns $TARGET_NS
-    __TMP="$__TMP/$TARGET_NS/$CLUSTER_NAME"
-    __confirm "Restore $TARGET_NS/$CLUSTER_NAME as $(__whoami)"
+    __select_ns $NAMESPACE
+    __TMP="$__TMP/$NAMESPACE/$CLUSTER_NAME"
+    __confirm "Restore $NAMESPACE/$CLUSTER_NAME as $(__whoami)"
     __uncompress $BACKUP_FILE $__TMP
     source $__TMP/env
 
@@ -293,20 +277,100 @@ restore() {
     echo "DONE"
 }
 
-USAGE="Usage: $(basename "$0") [options]
+BACKUP=false
+RESTORE=false
+INCREMENTAL=false
+NAMESPACE=""
+CLUSTER_NAME=""
+BACKUP_DIR=""
+BACKUP_FILE=""
+CUSTOM_CM=""
+CUSTOM_SE=""
+WAIT_TIMEOUT="300s"
+
+USAGE="Usage: $0 [options]
 
 Options:
-  -b, --backup   <source-ns> <cluster-name> <backup-dir>
-  -r, --restore  <target-ns> <cluster-name> <backup-file>"
-case "${1-}" in
-    -b|--backup)
-        shift
-        backup "$@"
-        ;;
-    -r|--restore)
-        shift
-        restore "$@"
-        ;;
-    *)
-        __error "$USAGE"
-esac
+  -b  Cluster backup
+  -r  Cluster restore
+  -i  Enable incremental backup (-bi)
+  -n  Source/target namespace
+  -c  Kafka cluster name
+  -d  Target backup directory path
+  -f  Source backup file path
+  -m  Custom configmaps (cm0,cm1,cm2)
+  -s  Custom secrets (se0,se1,se3)
+
+Example:
+  # backup
+  $0 -b -n test -c my-cluster -d /tmp \\
+    -m log4j-properties,custom-test \\
+    -s ext-listener-crt,custom-test
+  # restore
+  $0 -r -n test-new -c my-cluster \\
+    -f /tmp/my-cluster-20210228111235.zip"
+
+while getopts ":brin:c:d:f:m:s:" opt; do
+    case "${opt-}" in
+        b)
+            BACKUP=true
+            ;;
+        r)
+            RESTORE=true
+            ;;
+        i)
+            INCREMENTAL=true
+            ;;
+        n)
+            NAMESPACE=${OPTARG-}
+            ;;
+        c)
+            CLUSTER_NAME=${OPTARG-}
+            ;;
+        d)
+            BACKUP_DIR=${OPTARG-}
+            ;;
+        f)
+            BACKUP_FILE=${OPTARG-}
+            ;;
+        m)
+            CUSTOM_CM=${OPTARG-}
+            ;;
+        s)
+            CUSTOM_SE=${OPTARG-}
+            ;;
+        *)
+            __error "$USAGE"
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [[ $BACKUP = false && $RESTORE = false ]] \
+    || [[ $BACKUP = true && $RESTORE = true ]]; then
+    __error "$USAGE"
+fi
+
+if [ $BACKUP = true ]; then
+    if [[ -n $NAMESPACE && -n $CLUSTER_NAME && -n $BACKUP_DIR ]]; then
+        if [ -d $BACKUP_DIR ]; then
+            backup $NAMESPACE $CLUSTER_NAME $BACKUP_DIR
+        else
+            __error "Backup directory not found"
+        fi
+    else
+        __error "Specify source namespace, cluster name and target backup directory"
+    fi
+fi
+
+if [ $RESTORE = true ] ; then
+    if  [[ -n $NAMESPACE && -n $CLUSTER_NAME && -f $BACKUP_FILE ]]; then
+        if [ -f $BACKUP_FILE ]; then
+            restore $NAMESPACE $CLUSTER_NAME $BACKUP_FILE
+        else
+            __error "Backup file not found"
+        fi
+    else
+        __error "Specify target namespace, cluster name and source backup file"
+    fi
+fi

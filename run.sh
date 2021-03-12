@@ -159,7 +159,9 @@ backup() {
     # context init
     __select_ns $NAMESPACE
     __TMP="$__TMP/$NAMESPACE/$CLUSTER_NAME"
-    __confirm "Backup $NAMESPACE/$CLUSTER_NAME as $(__whoami); the cluster will be unavailable"
+    if [ $CONFIRM = true ]; then
+        __confirm "Backup $NAMESPACE/$CLUSTER_NAME as $(__whoami); the cluster will be unavailable"
+    fi
     if [ $INCREMENTAL = true ]; then
         echo "Doing an incremental backup"
     else
@@ -244,7 +246,9 @@ restore() {
     # context init
     __select_ns $NAMESPACE
     __TMP="$__TMP/$NAMESPACE/$CLUSTER_NAME"
-    __confirm "Restore $NAMESPACE/$CLUSTER_NAME as $(__whoami)"
+    if [ $CONFIRM = true ]; then
+        __confirm "Restore $NAMESPACE/$CLUSTER_NAME as $(__whoami)"
+    fi
     __uncompress $BACKUP_FILE $__TMP
     source $__TMP/env
 
@@ -280,6 +284,7 @@ restore() {
 BACKUP=false
 RESTORE=false
 INCREMENTAL=false
+CONFIRM=true
 NAMESPACE=""
 CLUSTER_NAME=""
 BACKUP_DIR=""
@@ -294,6 +299,7 @@ Options:
   -b  Cluster backup
   -r  Cluster restore
   -i  Enable incremental backup (-bi)
+  -y  Skip confirmation step (-by)
   -n  Source/target namespace
   -c  Kafka cluster name
   -d  Target backup directory path
@@ -301,7 +307,7 @@ Options:
   -m  Custom configmaps (cm0,cm1,cm2)
   -s  Custom secrets (se0,se1,se3)
 
-Example:
+Examples:
   # backup
   $0 -b -n test -c my-cluster -d /tmp \\
     -m log4j-properties,custom-test \\
@@ -310,7 +316,7 @@ Example:
   $0 -r -n test-new -c my-cluster \\
     -f /tmp/my-cluster-20210228111235.zip"
 
-while getopts ":brin:c:d:f:m:s:" opt; do
+while getopts ":briyn:c:d:f:m:s:" opt; do
     case "${opt-}" in
         b)
             BACKUP=true
@@ -320,6 +326,9 @@ while getopts ":brin:c:d:f:m:s:" opt; do
             ;;
         i)
             INCREMENTAL=true
+            ;;
+        y)
+            CONFIRM=false
             ;;
         n)
             NAMESPACE=${OPTARG-}

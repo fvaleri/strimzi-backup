@@ -37,11 +37,11 @@ spec:
       - id: 0
         type: persistent-claim
         size: 10Gi
-        deleteClaim: true
+        deleteClaim: false
       - id: 1
         type: persistent-claim
         size: 10Gi
-        deleteClaim: true
+        deleteClaim: false
     readinessProbe:
       initialDelaySeconds: 30
       timeoutSeconds: 10
@@ -181,7 +181,7 @@ spec:
     storage:
       type: persistent-claim
       size: 5Gi
-      deleteClaim: true
+      deleteClaim: false
     readinessProbe:
       initialDelaySeconds: 30
       timeoutSeconds: 10

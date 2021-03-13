@@ -1,5 +1,5 @@
 # Strimzi backup
-Script for cold/offline backups of namespaced `Strimzi` clusters on `Kubernetes/OpenShift`.
+Bash script for cold/offline backups of namespaced `Strimzi` clusters on `Kubernetes/OpenShift`.
 
 If you think you do not need a backup strategy for Kafka as it has embedded data replication,
 then try to immagine a misconfiguration/bug/security-breach deleting all your data. For hot/online
@@ -63,12 +63,12 @@ kubectl run kafka-producer-perf-test -it \
     --producer-props acks=1 bootstrap.servers=my-cluster-kafka-bootstrap:9092
 
 # run backup procedure
-./run.sh -b -n $NAMESPACE -c my-cluster -d /tmp/backups -m custom-cm
+./run.sh -b -n $NAMESPACE -c my-cluster -d /tmp -m custom-cm
 
 # recreate the namespace and restore
 kubectl delete ns $NAMESPACE
 kubectl create ns $NAMESPACE
-./run.sh -r -n $NAMESPACE -c my-cluster -f /tmp/backups/my-cluster-20210304181809.zip
+./run.sh -r -n $NAMESPACE -c my-cluster -f /tmp/my-cluster-20210304181809.zip
 
 ### VERIFY ###
 # deploy the operator and wait for provisioning

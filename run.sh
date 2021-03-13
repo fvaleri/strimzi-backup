@@ -35,14 +35,13 @@ __select_ns() {
 __export_env() {
     local op_name="strimzi-cluster-operator"
     local op_pod="$(kubectl get pods | grep $op_name | grep Running | cut -d " " -f1)"
-    kubectl exec -it $op_pod -- env | grep "VERSION" \
-        | sed -e "s/^/declare -- /" > $__TMP/env ||true
+    kubectl exec -i $op_pod -- env | grep "VERSION" | sed -e "s/^/declare -- /" > "$__TMP/env"
     local filter="data-$CLUSTER_NAME-zookeeper"
     ZOO_REPLICAS=$(kubectl get pvc | grep $filter | wc -l)
     ZOO_PVC_SIZE=$(kubectl get pvc | grep $filter-0 | awk '{print $4}')
     ZOO_PVC_CLASS=$(kubectl get pvc | grep $filter-0 | awk '{print $6}')
     JBOD_VOL_NUM=$(kubectl get pvc | grep $CLUSTER_NAME-kafka-0 | wc -l)
-    if ((JBOD_VOL_NUM > 0)); then
+    if ((JBOD_VOL_NUM > 1)); then
         filter="data-0-$CLUSTER_NAME-kafka"
     else
         filter="data-$CLUSTER_NAME-kafka"
@@ -51,7 +50,7 @@ __export_env() {
     KAFKA_PVC_SIZE=$(kubectl get pvc | grep $filter-0 | awk '{print $4}')
     KAFKA_PVC_CLASS=$(kubectl get pvc | grep $filter-0 | awk '{print $6}')
     declare -px ZOO_REPLICAS ZOO_PVC_SIZE ZOO_PVC_CLASS JBOD_VOL_NUM \
-        KAFKA_REPLICAS KAFKA_PVC_SIZE KAFKA_PVC_CLASS >> $__TMP/env
+        KAFKA_REPLICAS KAFKA_PVC_SIZE KAFKA_PVC_CLASS >> "$__TMP/env"
 }
 
 __export_res() {
@@ -109,7 +108,8 @@ __rsync() {
                 # fallback to full sync
                 flags="$flags --level=0"
             fi
-            kubectl exec -i $pod_name -- sh -c "tar $flags -C /data ." | tar -C $target -xv -f -
+            kubectl exec -i $pod_name -- sh -c "tar $flags -C /data ." \
+                | tar -C $target -xv -f - ||true
         fi
         kubectl delete pod $pod_name
     else
@@ -163,9 +163,9 @@ backup() {
         __confirm "Backup $NAMESPACE/$CLUSTER_NAME as $(__whoami); the cluster will be unavailable"
     fi
     if [ $INCREMENTAL = true ]; then
-        echo "Doing an incremental backup"
+        echo "Starting incremental backup"
     else
-        echo "Doing a full backup"
+        echo "Starting full backup"
         rm -rf $__TMP
     fi
     mkdir -p $__TMP/resources $__TMP/data
@@ -185,12 +185,16 @@ backup() {
     # internal certificates and user secrets
     __export_res "secrets" "strimzi.io/name=strimzi"
     # custom configmap and secrets
-    for name in $(printf $CUSTOM_CM | sed "s/,/ /g"); do
-        __export_res "cm/$name"
-    done
-    for name in $(printf $CUSTOM_SE | sed "s/,/ /g"); do
-        __export_res "secret/$name"
-    done
+    if [[ -n $CUSTOM_CM ]]; then
+        for name in $(printf $CUSTOM_CM | sed "s/,/ /g"); do
+            __export_res "cm/$name"
+        done
+    fi
+    if [[ -n $CUSTOM_SE ]]; then
+        for name in $(printf $CUSTOM_SE | sed "s/,/ /g"); do
+            __export_res "secret/$name"
+        done
+    fi
 
     # stop operator and statefulsets
     kubectl scale deployment strimzi-cluster-operator --replicas 0
@@ -211,7 +215,7 @@ backup() {
         __rsync $pvc $local_path
     done
     for ((i = 0; i < $KAFKA_REPLICAS; i++)); do
-        if ((JBOD_VOL_NUM > 0)); then
+        if ((JBOD_VOL_NUM > 1)); then
             for ((j = 0; j < $JBOD_VOL_NUM; j++)); do
                 local pvc="data-$j-$CLUSTER_NAME-kafka-$i"
                 local local_path="$__TMP/data/$pvc"
@@ -260,7 +264,7 @@ restore() {
         __rsync $__TMP/data/$pvc/. $pvc
     done
     for ((i = 0; i < $KAFKA_REPLICAS; i++)); do
-        if ((JBOD_VOL_NUM > 0)); then
+        if ((JBOD_VOL_NUM > 1)); then
             for (( j = 0; j < $JBOD_VOL_NUM; j++ )); do
                 local pvc="data-$j-$CLUSTER_NAME-kafka-$i"
                 __create_pvc $pvc $KAFKA_PVC_SIZE $KAFKA_PVC_CLASS
@@ -299,13 +303,13 @@ Options:
   -b  Cluster backup
   -r  Cluster restore
   -i  Enable incremental backup (-bi)
-  -y  Skip confirmation step (-by)
+  -y  Skip confirmation step (-by or -ry)
   -n  Source/target namespace
   -c  Kafka cluster name
   -d  Target backup directory path
   -f  Source backup file path
-  -m  Custom configmaps (cm0,cm1,cm2)
-  -s  Custom secrets (se0,se1,se3)
+  -m  Custom configmaps (i.e. cm0,cm1,cm2)
+  -s  Custom secrets (i.e. se0,se1,se3)
 
 Examples:
   # backup

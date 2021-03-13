@@ -13,12 +13,12 @@ Only local file system is supported, consumer group offsets are included, but no
 custom images, that are usually hosted on an external registry.
 
 ## Requirements
-- Bash 5.1.4(1)-release (GNU)
-- kubectl v1.20.4 (Kubernetes)
-- tar 1.33 (GNU)
-- yq 4.5.1 (YAML processor)
-- zip 3.0 (Info-ZIP)
-- unzip 6.00 (Info-ZIP)
+- bash 5+ (GNU)
+- kubectl 1.20+ (Kubernetes)
+- tar 1.33+ (GNU)
+- yq 4.5+ (YAML processor)
+- zip 3+ (Info-ZIP)
+- unzip 6+ (Info-ZIP)
 - enough disk space
 
 ## Test procedure
@@ -29,15 +29,13 @@ OPERATOR_URL="https://github.com/strimzi/strimzi-kafka-operator\
 # here we are using the same source and target namespace
 NAMESPACE="test"
 
-### SETUP ###
 # deploy a test cluster
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
-curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl apply -f -
-kubectl apply -f ./tests/test-$STRIMZI_VERSION.yaml
+curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl create -f -
+kubectl create -f ./tests/test-$STRIMZI_VERSION.yaml
 kubectl create cm custom-cm --from-literal=foo=bar
 
-### EXERCISE ###
 # send 100000 messages
 kubectl run kafka-producer-perf-test -it \
     --image="quay.io/strimzi/kafka:latest-kafka-2.6.0" \
@@ -63,18 +61,18 @@ kubectl run kafka-producer-perf-test -it \
     --producer-props acks=1 bootstrap.servers=my-cluster-kafka-bootstrap:9092
 
 # run backup procedure
-./run.sh -b -n $NAMESPACE -c my-cluster -d /tmp -m custom-cm
+./run.sh -b -n $NAMESPACE -c my-cluster -t /tmp/my-cluster.zip -m custom-cm
 
-# recreate the namespace and restore
+# delete namespace and restore
 kubectl delete ns $NAMESPACE
 kubectl create ns $NAMESPACE
-./run.sh -r -n $NAMESPACE -c my-cluster -f /tmp/my-cluster-20210304181809.zip
+./run.sh -r -n $NAMESPACE -c my-cluster -s /tmp/my-cluster.zip
 
-### VERIFY ###
 # deploy the operator and wait for provisioning
-curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl apply -f -
+curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl create -f -
 
 # check consumer group offsets
+cat /tmp/offsets.txt
 kubectl exec -it my-cluster-kafka-0 -c kafka -- \
     bin/kafka-consumer-groups.sh --bootstrap-server :9092 \
     --group my-group --describe

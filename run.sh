@@ -119,15 +119,15 @@ __rsync() {
 
 __compress() {
     local source_dir="$1"
-    local file_path="$2"
-    if [[ -n $source_dir && -n $file_path ]]; then
-        echo "Compressing $source_dir to $file_path"
-        local backup_dir=$(dirname "$file_path")
-        local backup_name=$(basename "$file_path")
+    local target_file="$2"
+    if [[ -n $source_dir && -n $target_file ]]; then
+        if [[ ${target_file: -4} != ".zip" ]]; then
+            target_file="$target_file.zip"
+        fi
+        echo "Compressing $source_dir to $target_file"
         local current_dir=$(pwd)
         cd $source_dir
-        zip -qr $backup_name *
-        mv $backup_name $backup_dir
+        zip -qr $target_file *
         cd $current_dir
     else
         __error "Missing required parameters"
@@ -135,13 +135,13 @@ __compress() {
 }
 
 __uncompress() {
-    local file_path="$1"
-    local dest_dir="$2"
-    if [[ -n $file_path && -n $dest_dir ]]; then
-        echo "Uncompressing $file_path to $dest_dir"
-        rm -rf $dest_dir
-        unzip -qo $file_path -d $dest_dir
-        chmod -R o+rw $dest_dir
+    local source_file="$1"
+    local target_dir="$2"
+    if [[ -n $source_file && -n $target_dir ]]; then
+        echo "Uncompressing $source_file to $target_dir"
+        rm -rf $target_dir
+        unzip -qo $source_file -d $target_dir
+        chmod -R o+rw $target_dir
     else
         __error "Missing required parameters"
     fi
@@ -153,7 +153,7 @@ backup() {
     else
         SOURCE_NS="$1"
         CLUSTER_NAME="$2"
-        BACKUP_DIR="$3"
+        TARGET_FILE="$3"
     fi
 
     # context init
@@ -233,8 +233,7 @@ backup() {
     # start the operator
     kubectl scale deployment strimzi-cluster-operator --replicas 1
 
-    local backup_name="$CLUSTER_NAME-$(date +%Y%m%d%H%M%S)"
-    __compress $__TMP $BACKUP_DIR/$backup_name.zip
+    __compress $__TMP $TARGET_FILE
     echo "DONE"
 }
 
@@ -244,7 +243,7 @@ restore() {
     else
         TARGET_NS="$1"
         CLUSTER_NAME="$2"
-        BACKUP_FILE="$3"
+        SOURCE_FILE="$3"
     fi
 
     # context init
@@ -253,7 +252,7 @@ restore() {
     if [ $CONFIRM = true ]; then
         __confirm "Restore $NAMESPACE/$CLUSTER_NAME as $(__whoami)"
     fi
-    __uncompress $BACKUP_FILE $__TMP
+    __uncompress $SOURCE_FILE $__TMP
     source $__TMP/env
 
     # for each PVC, create it and rsync data from backup to PV
@@ -281,7 +280,6 @@ restore() {
     # KafkaTopic resources must be created *before*
     # deploying the Topic Operator or it will delete them
     kubectl apply -f $__TMP/resources 2>/dev/null ||true
-
     echo "DONE"
 }
 
@@ -291,8 +289,8 @@ INCREMENTAL=false
 CONFIRM=true
 NAMESPACE=""
 CLUSTER_NAME=""
-BACKUP_DIR=""
-BACKUP_FILE=""
+TARGET_FILE=""
+SOURCE_FILE=""
 CUSTOM_CM=""
 CUSTOM_SE=""
 WAIT_TIMEOUT="300s"
@@ -306,21 +304,22 @@ Options:
   -y  Skip confirmation step (-by or -ry)
   -n  Source/target namespace
   -c  Kafka cluster name
-  -d  Target backup directory path
-  -f  Source backup file path
-  -m  Custom configmaps (i.e. cm0,cm1,cm2)
-  -s  Custom secrets (i.e. se0,se1,se3)
+  -t  Target backup file path
+  -s  Source backup file path
+  -m  Custom configmaps (-m cm0,cm1,cm2)
+  -x  Custom secrets (-x se0,se1,se2)
 
 Examples:
   # backup
-  $0 -b -n test -c my-cluster -d /tmp \\
+  $0 -b -n test -c my-cluster \\
+    -t /tmp/my-cluster.zip \\
     -m log4j-properties,custom-test \\
-    -s ext-listener-crt,custom-test
+    -x ext-listener-crt,custom-test
   # restore
   $0 -r -n test-new -c my-cluster \\
-    -f /tmp/my-cluster-20210228111235.zip"
+    -s /tmp/my-cluster.zip"
 
-while getopts ":briyn:c:d:f:m:s:" opt; do
+while getopts ":briyn:c:t:s:m:x:" opt; do
     case "${opt-}" in
         b)
             BACKUP=true
@@ -340,16 +339,16 @@ while getopts ":briyn:c:d:f:m:s:" opt; do
         c)
             CLUSTER_NAME=${OPTARG-}
             ;;
-        d)
-            BACKUP_DIR=${OPTARG-}
+        t)
+            TARGET_FILE=${OPTARG-}
             ;;
-        f)
-            BACKUP_FILE=${OPTARG-}
+        s)
+            SOURCE_FILE=${OPTARG-}
             ;;
         m)
             CUSTOM_CM=${OPTARG-}
             ;;
-        s)
+        x)
             CUSTOM_SE=${OPTARG-}
             ;;
         *)
@@ -365,25 +364,26 @@ if [[ $BACKUP = false && $RESTORE = false ]] \
 fi
 
 if [ $BACKUP = true ]; then
-    if [[ -n $NAMESPACE && -n $CLUSTER_NAME && -n $BACKUP_DIR ]]; then
+    if [[ -n $NAMESPACE && -n $CLUSTER_NAME && -n $TARGET_FILE ]]; then
+        BACKUP_DIR="$(dirname $TARGET_FILE)"
         if [ -d $BACKUP_DIR ]; then
-            backup $NAMESPACE $CLUSTER_NAME $BACKUP_DIR
+            backup $NAMESPACE $CLUSTER_NAME $TARGET_FILE
         else
-            __error "Backup directory not found"
+            __error "$BACKUP_DIR not found"
         fi
     else
-        __error "Specify source namespace, cluster name and target backup directory"
+        __error "Required parameters: namespace, cluster name and target file"
     fi
 fi
 
 if [ $RESTORE = true ] ; then
-    if  [[ -n $NAMESPACE && -n $CLUSTER_NAME && -f $BACKUP_FILE ]]; then
-        if [ -f $BACKUP_FILE ]; then
-            restore $NAMESPACE $CLUSTER_NAME $BACKUP_FILE
+    if  [[ -n $NAMESPACE && -n $CLUSTER_NAME && -f $SOURCE_FILE ]]; then
+        if [ -f $SOURCE_FILE ]; then
+            restore $NAMESPACE $CLUSTER_NAME $SOURCE_FILE
         else
-            __error "Backup file not found"
+            __error "$SOURCE_FILE file not found"
         fi
     else
-        __error "Specify target namespace, cluster name and source backup file"
+        __error "Required parameters: namespace, cluster name and source file"
     fi
 fi

@@ -11,10 +11,6 @@ __error() {
     exit 1
 }
 
-__whoami() {
-    printf $(kubectl config current-context | cut -d "/" -f3)
-}
-
 __confirm() {
     local message="$1"
     if [[ -n $message ]]; then
@@ -25,30 +21,44 @@ __confirm() {
     fi
 }
 
+__whoami() {
+    printf $(kubectl config current-context | cut -d "/" -f3)
+}
+
 __select_ns() {
     local ns="$1"
     if [[ -n $ns ]]; then
-        kubectl config set-context --current --namespace=$ns
+        kubectl config set-context --current --namespace="$ns"
+    fi
+}
+
+__wait_for() {
+    local resource="$1"
+    local condition="$2"
+    local selector="$3"
+    if [[ -n $resource && -n $condition && -n $selector ]]; then
+        kubectl wait "$resource" --for="$condition" --selector="$selector" --timeout="300s"
+    else
+        __error "Missing required parameters"
     fi
 }
 
 __export_env() {
-    local op_name="strimzi-cluster-operator"
-    local op_pod="$(kubectl get pods | grep $op_name | grep Running | cut -d " " -f1)"
+    local op_pod="$(kubectl get pods | grep strimzi-cluster-operator | grep Running | cut -d " " -f1)"
     kubectl exec -i $op_pod -- env | grep "VERSION" | sed -e "s/^/declare -- /" > "$__TMP/env"
     local filter="data-$CLUSTER_NAME-zookeeper"
-    ZOO_REPLICAS=$(kubectl get pvc | grep $filter | wc -l)
-    ZOO_PVC_SIZE=$(kubectl get pvc | grep $filter-0 | awk '{print $4}')
-    ZOO_PVC_CLASS=$(kubectl get pvc | grep $filter-0 | awk '{print $6}')
+    ZOO_REPLICAS=$(kubectl get kafka $CLUSTER_NAME -o yaml | yq eval ".spec.zookeeper.replicas" -)
+    ZOO_PVC_SIZE=$(kubectl get pvc $filter-0 -o yaml | yq eval ".spec.resources.requests.storage" -)
+    ZOO_PVC_CLASS=$(kubectl get pvc $filter-0 -o yaml | yq eval ".spec.storageClassName" -)
     JBOD_VOL_NUM=$(kubectl get pvc | grep $CLUSTER_NAME-kafka-0 | wc -l)
     if ((JBOD_VOL_NUM > 1)); then
         filter="data-0-$CLUSTER_NAME-kafka"
     else
         filter="data-$CLUSTER_NAME-kafka"
     fi
-    KAFKA_REPLICAS=$(kubectl get pvc | grep $filter | wc -l)
-    KAFKA_PVC_SIZE=$(kubectl get pvc | grep $filter-0 | awk '{print $4}')
-    KAFKA_PVC_CLASS=$(kubectl get pvc | grep $filter-0 | awk '{print $6}')
+    KAFKA_REPLICAS=$(kubectl get kafka $CLUSTER_NAME -o yaml | yq eval ".spec.kafka.replicas" -)
+    KAFKA_PVC_SIZE=$(kubectl get pvc $filter-0 -o yaml | yq eval ".spec.resources.requests.storage" -)
+    KAFKA_PVC_CLASS=$(kubectl get pvc $filter-0 -o yaml | yq eval ".spec.storageClassName" -)
     declare -px ZOO_REPLICAS ZOO_PVC_SIZE ZOO_PVC_CLASS JBOD_VOL_NUM \
         KAFKA_REPLICAS KAFKA_PVC_SIZE KAFKA_PVC_CLASS >> "$__TMP/env"
 }
@@ -72,13 +82,42 @@ __export_res() {
     fi
 }
 
+__rsync() {
+    local source="$1"
+    local target="$2"
+    if [[ -n $source && -n $target ]]; then
+        echo "Rsync from $source to $target"
+        local pod_name="backup"
+        local patch=$(sed "s/\$pvc/$pvc/g" $__HOME/patch.json)
+        kubectl run $pod_name --image="dummy" --restart="Never" --overrides="$patch"
+        __wait_for pod condition=ready run=backup
+        local flags="--no-check-device --no-acls --no-xattrs --no-same-owner --no-overwrite-dir"
+        if [[ $source == *"$__TMP"* ]]; then
+            # upload from local to pod
+            tar $flags -C $source -c . | kubectl exec -i $pod_name -- sh -c "tar $flags -C /data -xv -f -"
+        else
+            # incremental sync from pod to local
+            flags="$flags --listed-incremental /data/backup.snar \
+                --exclude=backup.snar --exclude=data/version-2/{currentEpoch,acceptedEpoch}"
+            if [ -z "$(ls -A $__TMP/data)" ]; then
+                # fallback to full sync
+                flags="$flags --level=0"
+            fi
+            kubectl exec -i $pod_name -- sh -c "tar $flags -C /data -c ." | tar $flags -C $target -xv -f -
+        fi
+        kubectl delete pod $pod_name
+    else
+        __error "Missing required parameters"
+    fi
+}
+
 __create_pvc() {
     local pvc="$1"
     local size="$2"
     local class="${3-}"
     if [[ -n $pvc && -n $size ]]; then
         local exp="s/\$pvc/$pvc/g; s/\$size/$size/g; /storageClassName/d"
-        if [[ -n $class ]]; then
+        if [ "$class" != "null" ]; then
             exp="s/\$pvc/$pvc/g; s/\$size/$size/g; s/\$class/$class/g"
         fi
         echo "Creating pvc $pvc of size $size"
@@ -88,46 +127,14 @@ __create_pvc() {
     fi
 }
 
-__rsync() {
-    local source="$1"
-    local target="$2"
-    if [[ -n $source && -n $target ]]; then
-        echo "Rsync from $source to $target"
-        local pod_name="backup"
-        local patch=$(sed "s/\$pvc/$pvc/g" $__HOME/patch.json)
-        kubectl run $pod_name --image="dummy" --restart="Never" --overrides="$patch"
-        kubectl wait --for condition="ready" pod $pod_name --timeout="$WAIT_TIMEOUT"
-        if [[ $source == *"$__TMP"* ]]; then
-            # upload from local to pod
-            tar -C $source -c . | kubectl exec -i $pod_name -- sh -c "tar -C /data -xv"
-        else
-            # incremental sync from pod to local
-            local flags="-c --no-check-device --no-acls --no-xattrs --totals \
-                --listed-incremental /data/backup.snar --exclude=./backup.snar"
-            if [ -z "$(ls -A $__TMP/data)" ]; then
-                # fallback to full sync
-                flags="$flags --level=0"
-            fi
-            kubectl exec -i $pod_name -- sh -c "tar $flags -C /data ." \
-                | tar -C $target -xv -f - ||true
-        fi
-        kubectl delete pod $pod_name
-    else
-        __error "Missing required parameters"
-    fi
-}
-
 __compress() {
     local source_dir="$1"
     local target_file="$2"
     if [[ -n $source_dir && -n $target_file ]]; then
-        if [[ ${target_file: -4} != ".zip" ]]; then
-            target_file="$target_file.zip"
-        fi
         echo "Compressing $source_dir to $target_file"
         local current_dir=$(pwd)
         cd $source_dir
-        zip -qr $target_file *
+        zip -FSqr $target_file *
         cd $current_dir
     else
         __error "Missing required parameters"
@@ -141,7 +148,7 @@ __uncompress() {
         echo "Uncompressing $source_file to $target_dir"
         rm -rf $target_dir
         unzip -qo $source_file -d $target_dir
-        chmod -R o+rw $target_dir
+        chmod -R ugo+rwx $target_dir
     else
         __error "Missing required parameters"
     fi
@@ -197,15 +204,15 @@ backup() {
     fi
 
     # stop operator and statefulsets
-    kubectl scale deployment strimzi-cluster-operator --replicas 0
-    kubectl wait --for="delete" pod \
-        --selector="name=strimzi-cluster-operator" --timeout="$WAIT_TIMEOUT"
+    local op_deploy="$(oc get deploy strimzi-cluster-operator -o name)"
+    if [[ -n $op_deploy ]]; then
+        kubectl scale $op_deploy --replicas 0
+        __wait_for pod delete name=strimzi-cluster-operator
+    fi
     kubectl scale statefulset $CLUSTER_NAME-kafka --replicas 0
-    kubectl wait --for="delete" pod \
-        --selector="strimzi.io/name=$CLUSTER_NAME-kafka" --timeout="$WAIT_TIMEOUT"
+    __wait_for pod delete strimzi.io/name=$CLUSTER_NAME-kafka
     kubectl scale statefulset $CLUSTER_NAME-zookeeper --replicas 0
-    kubectl wait --for="delete" pod \
-        --selector="strimzi.io/name=$CLUSTER_NAME-zookeeper" --timeout="$WAIT_TIMEOUT"
+    __wait_for pod delete strimzi.io/name=$CLUSTER_NAME-zookeeper
 
     # for each PVC, rsync data from PV to backup
     for ((i = 0; i < $ZOO_REPLICAS; i++)); do
@@ -230,10 +237,19 @@ backup() {
         fi
     done
 
-    # start the operator
-    kubectl scale deployment strimzi-cluster-operator --replicas 1
-
+    # create the archive
     __compress $__TMP $TARGET_FILE
+
+    # start statefulsets and operator
+    kubectl scale statefulset $CLUSTER_NAME-zookeeper --replicas $ZOO_REPLICAS
+    __wait_for pod condition=ready strimzi.io/name=$CLUSTER_NAME-zookeeper
+    kubectl scale statefulset $CLUSTER_NAME-kafka --replicas $KAFKA_REPLICAS
+    __wait_for pod condition=ready strimzi.io/name=$CLUSTER_NAME-kafka
+    if [[ -n $op_deploy ]]; then
+        kubectl scale $op_deploy --replicas 1
+        __wait_for pod condition=ready name=strimzi-cluster-operator
+    fi
+
     echo "DONE"
 }
 
@@ -280,6 +296,7 @@ restore() {
     # KafkaTopic resources must be created *before*
     # deploying the Topic Operator or it will delete them
     kubectl apply -f $__TMP/resources 2>/dev/null ||true
+
     echo "DONE"
 }
 
@@ -293,7 +310,6 @@ TARGET_FILE=""
 SOURCE_FILE=""
 CUSTOM_CM=""
 CUSTOM_SE=""
-WAIT_TIMEOUT="300s"
 
 USAGE="Usage: $0 [options]
 
@@ -376,7 +392,7 @@ if [ $BACKUP = true ]; then
     fi
 fi
 
-if [ $RESTORE = true ] ; then
+if [ $RESTORE = true ]; then
     if  [[ -n $NAMESPACE && -n $CLUSTER_NAME && -f $SOURCE_FILE ]]; then
         if [ -f $SOURCE_FILE ]; then
             restore $NAMESPACE $CLUSTER_NAME $SOURCE_FILE

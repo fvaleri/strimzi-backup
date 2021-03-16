@@ -1,16 +1,16 @@
 # Strimzi backup
-Bash script for cold/offline backups of *Strimzi* clusters on *Kubernetes/OpenShift*.
+Bash script for cold/offline backups of Strimzi clusters on Kubernetes/OpenShift.
 
 If you think you do not need a backup strategy for Kafka as it has embedded data replication,
 then try to immagine a misconfiguration/bug/security-breach deleting all your data. For hot/online
-backups, you should look at *MirrorMaker2* to sync with a remote cluster, but this comes with
+backups, you should look at MirrorMaker2 to sync with a remote cluster, but this comes with
 additional complexities and required resources.
 
 To run the script the user must have rights to work with PVC and use Strimzi custom resources.
 The backup procedure will stop the operator and the whole cluster for the duration of the process.
 If you have a single cluster wide operator, then you need to manually scale it down before start.
 
-The final archive contains an *env* file with the operator's version that you need to deploy *after*
+The final archive contains an `env` file with the operator's version that you need to deploy after
 the restore has finished. Only local file system is supported, consumer group offsets are included,
 but not KafkaConnect custom images, that are usually hosted on an external registry.
 
@@ -63,13 +63,13 @@ kubectl run kafka-producer-perf-test -it \
 # run backup procedure
 ./run.sh -b -n $NAMESPACE -c my-cluster -t /tmp/my-cluster.zip -m custom-cm
 
-# delete the namespace and restore
+# recreate the namespace
 kubectl delete ns $NAMESPACE
 kubectl create ns $NAMESPACE
-./run.sh -r -n $NAMESPACE -c my-cluster -s /tmp/my-cluster.zip
 
-# deploy the operator and wait for provisionig
+# deploy the operator and restore
 curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl create -f -
+./run.sh -r -n $NAMESPACE -c my-cluster -s /tmp/my-cluster.zip
 
 # check consumer group offsets (expected: current-offset match)
 cat /tmp/offsets.txt

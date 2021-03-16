@@ -91,7 +91,7 @@ __rsync() {
         local patch=$(sed "s/\$pvc/$pvc/g" $__HOME/patch.json)
         kubectl run $pod_name --image="dummy" --restart="Never" --overrides="$patch"
         __wait_for pod condition=ready run=backup
-        local flags="--no-check-device --no-acls --no-xattrs --no-same-owner --no-overwrite-dir"
+        local flags="--no-check-device --no-acls --no-xattrs --no-same-owner --no-overwrite-dir --touch"
         if [[ $source == *"$__TMP"* ]]; then
             # upload from local to pod
             tar $flags -C $source -c . | kubectl exec -i $pod_name -- sh -c "tar $flags -C /data -xv -f -"

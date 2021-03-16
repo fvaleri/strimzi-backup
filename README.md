@@ -8,10 +8,10 @@ additional complexities and required resources.
 
 To run the script the user must have rights to work with PVC and use Strimzi custom resources.
 The backup procedure will stop the operator and the whole cluster for the duration of the process.
-If you have a single cluster wide operator, then you need to manually scale it down before start.
+If you have a single cluster wide operator, then you need to scale it down manually.
 
-The final archive contains an `env` file with the operator's version that you need to deploy after
-the restore has finished. Only local file system is supported, consumer group offsets are included,
+The final archive contains an `env` file with the operator's version that you have to deploy before
+running the restore procedure. Only local file system is supported, consumer group offsets are included,
 but not KafkaConnect custom images, that are usually hosted on an external registry.
 
 ## Requirements
@@ -63,12 +63,12 @@ kubectl run kafka-producer-perf-test -it \
 # run backup procedure
 ./run.sh -b -n $NAMESPACE -c my-cluster -t /tmp/my-cluster.zip -m custom-cm
 
-# recreate the namespace
+# recreate the namespace and deploy the operator
 kubectl delete ns $NAMESPACE
 kubectl create ns $NAMESPACE
-
-# deploy the operator and restore
 curl -L $OPERATOR_URL | sed "s/namespace: .*/namespace: $NAMESPACE/g" | kubectl create -f -
+
+# run restore procedure and wait for provisioning
 ./run.sh -r -n $NAMESPACE -c my-cluster -s /tmp/my-cluster.zip
 
 # check consumer group offsets (expected: current-offset match)

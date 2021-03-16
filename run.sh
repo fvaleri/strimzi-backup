@@ -43,6 +43,52 @@ __wait_for() {
     fi
 }
 
+__start_cluster() {
+    local cluster_name="$1"
+    if [[ -n $cluster_name ]]; then
+        echo "Starting cluster $cluster_name"
+        local op_deploy="$(oc get deploy strimzi-cluster-operator -o name --ignore-not-found)"
+        if [[ -n $op_deploy ]]; then
+            kubectl scale $op_deploy --replicas 1
+            __wait_for pod condition=ready name=strimzi-cluster-operator
+            local i=0
+            local max=300
+            local wait_cmd="__wait_for pod condition=ready strimzi.io/name=$cluster_name-entity-operator"
+            echo "Waiting for entity operator recreation"
+            while [[ -n "$($wait_cmd 2>&1 >/dev/null)" && i -lt max ]]; do
+                i=$((i+1))
+                sleep 1
+            done
+        fi
+    else
+        __error "Missing required parameters"
+    fi
+}
+
+__stop_cluster() {
+    local cluster_name="$1"
+    if [[ -n $cluster_name ]]; then
+        echo "Stopping cluster $cluster_name"
+        local op_deploy="$(oc get deploy strimzi-cluster-operator -o name --ignore-not-found)"
+        if [[ -n $op_deploy ]]; then
+            kubectl scale $op_deploy --replicas 0
+            __wait_for pod delete name=strimzi-cluster-operator
+        fi
+        local kafka_ss="$(oc get statefulset $cluster_name-kafka -o name --ignore-not-found)"
+        if [[ -n $kafka_ss ]]; then
+            kubectl scale $kafka_ss --replicas 0
+            __wait_for pod delete strimzi.io/name=$cluster_name-kafka
+        fi
+        local zoo_ss="$(oc get statefulset $cluster_name-zookeeper -o name --ignore-not-found)"
+        if [[ -n $zoo_ss ]]; then
+            kubectl scale $zoo_ss --replicas 0
+            __wait_for pod delete strimzi.io/name=$cluster_name-zookeeper
+        fi
+    else
+        __error "Missing required parameters"
+    fi
+}
+
 __export_env() {
     local op_pod="$(kubectl get pods | grep strimzi-cluster-operator | grep Running | cut -d " " -f1)"
     kubectl exec -i $op_pod -- env | grep "VERSION" | sed -e "s/^/declare -- /" > "$__TMP/env"
@@ -67,7 +113,7 @@ __export_res() {
     local name="$1"
     local label="${2-}"
     if [[ -n $name ]]; then
-        local crs=$(kubectl get $name -o name -l "$label")
+        local crs=$(kubectl get $name -o name -l "$label" --ignore-not-found)
         if [[ -n $crs ]]; then
             echo "Exporting $name"
             # delete runtime metadata expression
@@ -87,10 +133,10 @@ __rsync() {
     local target="$2"
     if [[ -n $source && -n $target ]]; then
         echo "Rsync from $source to $target"
-        local pod_name="backup"
+        local pod_name="strimzi-backup"
         local patch=$(sed "s/\$pvc/$pvc/g" $__HOME/patch.json)
         kubectl run $pod_name --image="dummy" --restart="Never" --overrides="$patch"
-        __wait_for pod condition=ready run=backup
+        __wait_for pod condition=ready run="$pod_name"
         local flags="--no-check-device --no-acls --no-xattrs --no-same-owner --no-overwrite-dir --touch"
         if [[ $source == *"$__TMP"* ]]; then
             # upload from local to pod
@@ -163,7 +209,7 @@ backup() {
         TARGET_FILE="$3"
     fi
 
-    # context init
+    # init context
     __select_ns $NAMESPACE
     __TMP="$__TMP/$NAMESPACE/$CLUSTER_NAME"
     if [ $CONFIRM = true ]; then
@@ -177,6 +223,7 @@ backup() {
     fi
     mkdir -p $__TMP/resources $__TMP/data
     __export_env
+    __stop_cluster $CLUSTER_NAME
 
     # export resources
     __export_res "kafkas"
@@ -203,17 +250,6 @@ backup() {
         done
     fi
 
-    # stop operator and statefulsets
-    local op_deploy="$(oc get deploy strimzi-cluster-operator -o name)"
-    if [[ -n $op_deploy ]]; then
-        kubectl scale $op_deploy --replicas 0
-        __wait_for pod delete name=strimzi-cluster-operator
-    fi
-    kubectl scale statefulset $CLUSTER_NAME-kafka --replicas 0
-    __wait_for pod delete strimzi.io/name=$CLUSTER_NAME-kafka
-    kubectl scale statefulset $CLUSTER_NAME-zookeeper --replicas 0
-    __wait_for pod delete strimzi.io/name=$CLUSTER_NAME-zookeeper
-
     # for each PVC, rsync data from PV to backup
     for ((i = 0; i < $ZOO_REPLICAS; i++)); do
         local pvc="data-$CLUSTER_NAME-zookeeper-$i"
@@ -239,16 +275,7 @@ backup() {
 
     # create the archive
     __compress $__TMP $TARGET_FILE
-
-    # start statefulsets and operator
-    kubectl scale statefulset $CLUSTER_NAME-zookeeper --replicas $ZOO_REPLICAS
-    __wait_for pod condition=ready strimzi.io/name=$CLUSTER_NAME-zookeeper
-    kubectl scale statefulset $CLUSTER_NAME-kafka --replicas $KAFKA_REPLICAS
-    __wait_for pod condition=ready strimzi.io/name=$CLUSTER_NAME-kafka
-    if [[ -n $op_deploy ]]; then
-        kubectl scale $op_deploy --replicas 1
-        __wait_for pod condition=ready name=strimzi-cluster-operator
-    fi
+    __start_cluster $CLUSTER_NAME
 
     echo "DONE"
 }
@@ -262,7 +289,7 @@ restore() {
         SOURCE_FILE="$3"
     fi
 
-    # context init
+    # init context
     __select_ns $NAMESPACE
     __TMP="$__TMP/$NAMESPACE/$CLUSTER_NAME"
     if [ $CONFIRM = true ]; then
@@ -270,6 +297,7 @@ restore() {
     fi
     __uncompress $SOURCE_FILE $__TMP
     source $__TMP/env
+    __stop_cluster $CLUSTER_NAME
 
     # for each PVC, create it and rsync data from backup to PV
     # this must be done *before* deploying the cluster
@@ -296,6 +324,7 @@ restore() {
     # KafkaTopic resources must be created *before*
     # deploying the Topic Operator or it will delete them
     kubectl apply -f $__TMP/resources 2>/dev/null ||true
+    __start_cluster $CLUSTER_NAME
 
     echo "DONE"
 }
